@@ -19,9 +19,8 @@ from unittest.mock import MagicMock, patch
 TESTS_DIR = Path(__file__).parent
 LAB_DIR = TESTS_DIR.parent
 
-# Resolve module paths
-SOLUTION_PATH = LAB_DIR / "solution-code" / "solution.py"
-TEMPLATE_PATH = LAB_DIR / "starter-code" / "template.py"
+# Check the completed solution while preserving the original exercise template.
+SOLUTION_PATH = LAB_DIR / "solution" / "solution.py"
 
 def _load_module(path: Path, unique_name: str):
     if not path.exists():
@@ -33,11 +32,7 @@ def _load_module(path: Path, unique_name: str):
     return mod
 
 
-# Dynamically load the solution module if it exists (for grading), otherwise test the starter template
-if SOLUTION_PATH.exists():
-    _m = _load_module(SOLUTION_PATH, "solution")
-else:
-    _m = _load_module(TEMPLATE_PATH, "template")
+_m = _load_module(SOLUTION_PATH, "solution")
 
 # Import target functions
 call_openai = getattr(_m, "call_openai")
@@ -146,7 +141,7 @@ class TestCompareModels(unittest.TestCase):
     def test_compare_models_evaluates_correct_costs(self):
         with patch.object(_m, "call_openai") as mock_openai, \
              patch.object(_m, "call_gemini") as mock_gemini:
-             
+
             # Setup mock returns
             mock_openai.side_effect = [
                 ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),       # 1st call: gpt-4o
@@ -168,10 +163,10 @@ class TestCompareModels(unittest.TestCase):
             # Verify exact cost calculations
             # gpt-4o: (10 * 5.0 + 20 * 20.0) / 1,000,000 = 0.00045
             self.assertAlmostEqual(result["gpt4o"]["cost"], 0.00045, places=8)
-            
+
             # gpt-4o-mini: (10 * 0.150 + 20 * 0.600) / 1,000,000 = 0.0000135
             self.assertAlmostEqual(result["gpt4o_mini"]["cost"], 0.0000135, places=8)
-            
+
             # gemini-2.5-flash: (10 * 0.075 + 20 * 0.300) / 1,000,000 = 0.00000675
             self.assertAlmostEqual(result["gemini_flash"]["cost"], 0.00000675, places=8)
 
@@ -207,7 +202,7 @@ class TestBatchCompareAndFormat(unittest.TestCase):
 
     def test_batch_runs_and_formats_table(self):
         with patch.object(_m, "compare_models") as mock_comp:
-            def _get_mock():
+            def _get_mock(prompt):
                 return {
                     "gpt4o": {"response": "GPT-4o response content here", "latency": 0.5, "cost": 0.00045, "input_tokens": 10, "output_tokens": 20},
                     "gpt4o_mini": {"response": "GPT-4o-Mini response content here", "latency": 0.3, "cost": 0.0000135, "input_tokens": 10, "output_tokens": 20},
@@ -216,6 +211,7 @@ class TestBatchCompareAndFormat(unittest.TestCase):
             mock_comp.side_effect = _get_mock
 
             results = batch_compare(["Q1", "Q2"])
+            self.assertEqual([call.args[0] for call in mock_comp.call_args_list], ["Q1", "Q2"])
             self.assertEqual(len(results), 2)
             self.assertEqual(results[0]["prompt"], "Q1")
 
@@ -228,6 +224,37 @@ class TestBatchCompareAndFormat(unittest.TestCase):
 
 
 class TestStreamingChatbot(unittest.TestCase):
+
+    @patch("builtins.print")
+    @patch("builtins.input", side_effect=["Q1", "Q2", "Q3", "Q4", "Q5", "exit"])
+    @patch("google.genai.Client")
+    def test_streams_and_keeps_three_completed_turns(self, MockClient, mock_input, mock_print):
+        from types import SimpleNamespace
+
+        stream = MockClient.return_value.models.generate_content_stream
+        stream.side_effect = lambda **kwargs: iter([
+            SimpleNamespace(text=None),
+            SimpleNamespace(text="Hello "),
+            SimpleNamespace(text="world"),
+        ])
+        streaming_chatbot()
+        self.assertEqual(stream.call_count, 5)
+        contents = stream.call_args.kwargs["contents"]
+        self.assertEqual(len(contents), 7)  # Three completed turns + current question.
+        self.assertEqual(contents[0]["parts"][0]["text"], "Q2")
+        self.assertEqual(contents[-1]["parts"][0]["text"], "Q5")
+        self.assertEqual(contents[-2]["role"], "model")
+        self.assertEqual(contents[-2]["parts"][0]["text"], "Hello world")
+        mock_print.assert_any_call("Hello ", end="", flush=True)
+        mock_print.assert_any_call("world", end="", flush=True)
+
+    @patch.object(_m.time, "sleep")
+    def test_backoff_delays_and_retry_limit(self, mock_sleep):
+        fn = MagicMock(side_effect=RuntimeError("failed"))
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            retry_with_backoff(fn, max_retries=3, base_delay=0.1)
+        self.assertEqual(fn.call_count, 4)
+        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [0.1, 0.2, 0.4])
 
     @patch("builtins.input", side_effect=["quit"])
     @patch("google.genai.Client")
